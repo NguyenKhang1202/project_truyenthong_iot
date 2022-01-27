@@ -31,6 +31,7 @@ const char* devide_ID = DEVIDE_ID;
 //const char* ds3231 = DS3231_ID;
 //int servo1_pin = SERVO_1_PIN;
 //int servo2_pin = SERVO_2_PIN;
+
 //task_1 : "cho an thu cong";
 //task_2 : "cho an tu dong";
 //task_3 : "hen gio cho an";
@@ -43,9 +44,11 @@ boolean isTask2 = false;
 boolean isTask3 = false;
 
 // weight_static : là lượng khi cho ăn tự động 
-// weight_tmp : lượng hẹn giờ or cho ăn thủ công 
+// weight_tmp : lượng cho ăn thủ công 
+// weight_schedule : lượng hẹn giờ
 int weight_static = 0;
 int weight_tmp = 0;
+int weught_schedule = 0;
 int time_hour = 0;
 int time_min = 0;
 int time_day = 0;
@@ -142,33 +145,42 @@ void callback(char* topic, byte *payload, unsigned int length) {
   time_day = mess_subcribe["DateTime"][1];
   time_hour = mess_subcribe["DateTime"][2];
   time_min = mess_subcribe["DateTime"][3];
-    // --so sánh 2 id, nếu đúng thì cân bằng time giữa ds3231 và web--
+  
+    // ----- so sánh 2 id, nếu đúng thì tiếp tục -----
   if(strcmp(devide_ID, mess_subcribe["DevideID"]) == 0){
+
+    // nếu vào task1 : cho ăn thủ công 
     if(strcmp(mess_subcribe["Task"],"1") == 0){
       isTask1 = true;
       weight_tmp = mess_subcribe["Weight"];
       Serial.println("Vao Task 1 : cho an thu cong");
-    } else if(strcmp(mess_subcribe["Task"],"2") == 0){
-      //isTask2 = true;
+    } 
+    // nếu vào task2 : cho ăn tự động 
+    else if(strcmp(mess_subcribe["Task"],"2") == 0){
       if(strcmp(mess_subcribe["isAuto"],"1")){
-        isAuto = true;
+        isTask2 = true;
         weight_static = mess_subcribe["Weight"];
       }else {
-        isAuto = false;
+        isTask2 = false;
       }
       Serial.println("Vao Task 2 : cho an tu dong");
-    } else if(strcmp(mess_subcribe["Task"],"3") == 0){
+    } 
+    // nếu vào task3 : đặt lịch  
+    else if(strcmp(mess_subcribe["Task"],"3") == 0){
       isTask3 = true;
+      
       time_schedule_month = mess_subcribe["TimeSchedule"][0];
       time_schedule_day = mess_subcribe["TimeSchedule"][1];
       time_schedule_hour = mess_subcribe["TimeSchedule"][2];
       time_schedule_min = mess_subcribe["TimeSchedule"][3];
+      weight_schedule = mess_subcribe["Weight"];
       Serial.println("Vao Task 3 : dat lich cho an");
     } else {
       Serial.println("Invalid task.");
     }
   }
 }
+
 void setup() {
 //  myservo1.attach(servo1_pin);
 //  myservo2.attach(servo2_pin);
@@ -233,7 +245,6 @@ void loop() {
   if (isTask1 == true &&(time_hour == now.hour()) && (time_min == now.minute()) && (time_month == now.month())&&(time_day == now.day())) {
     delay(1000);   
     char buffer[256];
-    int arr[] = {now.hour(),now.minute(),now.day(),now.month()};
     Serial.println("chay task 1 : cho an thu cong va publish mess");
     mess_publish["Weight"] = weight_tmp;
     JsonArray Datetime = mess_publish.createNestedArray("Datetime");
@@ -250,7 +261,9 @@ void loop() {
     isTask1 = false;
     weight_tmp = 0;
   }
-  if(isAuto == true){
+
+  // isTask2 == isAuto : có tự động hay không
+  if(isTask2 == true){
     if(current_weight < weight_static){
       double weight = 10;
       current_weight += weight;
@@ -261,26 +274,59 @@ void loop() {
      isFeed=false;
      isDone=true;
      Serial.println("Done");
+     mess_publish["Weight"] = current_weight;
+      JsonArray Datetime = mess_publish.createNestedArray("Datetime");
+      Datetime.add(time_month);
+      Datetime.add(time_day);
+      Datetime.add(time_hour);
+      Datetime.add(time_min);
+      serializeJson(mess_publish, buffer);
+      client.publish(MQTT_COMPLETE_TOPIC, buffer);
      delay(1000);
-    } 
-    //isTask2 = false;
-    mess_publish["Weight"] = current_weight;
-    JsonArray Datetime = mess_publish.createNestedArray("Datetime");
-    Datetime.add(time_month);
-    Datetime.add(time_day);
-    Datetime.add(time_hour);
-    Datetime.add(time_min);
-    serializeJson(mess_publish, buffer);
-    client.publish(MQTT_COMPLETE_TOPIC, buffer);
-  }
-  if(isTask3 == true){
-    // xử lý đặt lịch
-    // thêm or xóa timeSchedule trong array
-    // .....
-    isTask3 = false;
+    }  
   }
 
-  // còn 2 hàm nữa , 1 là khi đến h trong timeSchedule thì nhả, 2 là nếu isAuto = 1 và lượng thức ăn nhỏ hơn weight thì nhả 
-  
+  // nếu có hẹn giờ và không tự động cho ăn
+  if((isTask3 == true && isTask2 == false) && (time_schedule_hour == now.hour()) && (time_schedule_min == now.minute()) 
+      && (time_schedule_month == now.month())&&(time_schedule_day == now.day())){
+    delay(1000);   
+    char buffer[256];
+    Serial.println("chay task 3 : dat lich cho an va publish mess");
+    mess_publish["Weight"] = weight_schedule;
+    JsonArray Datetime = mess_publish.createNestedArray("Datetime");
+    Datetime.add(time_schedule_month);
+    Datetime.add(time_schedule_day);
+    Datetime.add(time_schedule_hour);
+    Datetime.add(time_schedule_min);
+    serializeJson(mess_publish, buffer);
+    client.publish(MQTT_COMPLETE_TOPIC, buffer);
+    
+    if(current_weight < weight_schedule){
+      //myservo1.write(40);  
+      //double weight = scale.get_units(10);
+     double weight = 10;
+     Serial.print("weight: ");
+     Serial.println(weight);
+     current_weight+= weight;
+     Serial.print("curr weight: ");
+     Serial.println(current_weight);
+    } else {
+     //current_weight = 0;
+     //myservo1.write(0);
+     isFeed=false;
+     isDone=true;
+     Serial.println("Done");
+     isTask3 = false;
+      mess_publish["Weight"] = weight_schedule;
+      JsonArray Datetime = mess_publish.createNestedArray("Datetime");
+      Datetime.add(time_schedule_month);
+      Datetime.add(time_schedule_day);
+      Datetime.add(time_schedule_hour);
+      Datetime.add(time_schedule_min);
+      serializeJson(mess_publish, buffer);
+      client.publish(MQTT_COMPLETE_TOPIC, buffer);
+     delay(1000);
+    } 
+  }
   
 }
