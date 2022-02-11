@@ -1,0 +1,24 @@
+{
+	"id": "ae22e193-74ee-49ef-b142-46b9dd448a16",
+	"name": "PetFeederEnvironment",
+	"values": [
+		{
+			"key": "url",
+			"value": "localhost:8000",
+			"enabled": true
+		},
+		{
+			"key": "userToken",
+			"value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJfaWQiOiI2MWNkYzZlYzljNzI2ZGE3NjgwYjRjZGEiLCJpYXQiOjE2NDA5NDEwMjMsImV4cCI6MTY0MDk3NzAyM30.hUSZXkIuBtSL8NkB2R3Lq-zTOP61_v4-uII2qERHmYE",
+			"enabled": true
+		},
+		{
+			"key": "adminToken",
+			"value": "",
+			"enabled": true
+		}
+	],
+	"_postman_variable_scope": "environment",
+	"_postman_exported_at": "2022-01-17T11:26:50.809Z",
+	"_postman_exported_using": "Postman/8.12.1"
+}

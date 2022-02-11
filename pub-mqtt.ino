@@ -5,13 +5,15 @@
 #include "RTClib.h"
 #include "esp32_secrets.h"
 #include <String.h>
+#include "HX711.h"
+#include <iostream>
+#include <vector>
 
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
 
 RTC_DS3231 rtc;
 Servo myservo1; 
-//Servo myservo2; 
 
 const char* ssid = SECRET_SSID;
 const char* password =  SECRET_PASS;
@@ -20,79 +22,58 @@ const char* password =  SECRET_PASS;
 #define MQTT_PORT 1883
 #define MQTT_USER "mqttbroker"
 #define MQTT_PASSWORD "12345678"
-#define MQTT_LED_TOPIC "nodeWiFi32/led"
-#define MQTT_SCHEDULE_TOPIC "nodeWiFi32/schedule"
-#define MQTT_COMPLETE_TOPIC "nodeWiFi32/complete"
+#define MQTT_SCHEDULE_TOPIC "/command/2"
+#define MQTT_COMPLETE_TOPIC "/history"
+
+const int Led = 2;
+#define BUZZER_PIN 25
 
 // servo_1 : đóng mở nắp, servo_2 : trộn thức ăn
 const char* devide_ID = DEVIDE_ID;
-//const char* sensor_servo_1 = SERVO_1_ID;
-//const char* sensor_servo_2 = SERVO_2_ID;
-//const char* ds3231 = DS3231_ID;
+
 int servo1_pin = 27;
-//int servo2_pin = SERVO_2_PIN;
+
+// setup schedule
+unsigned long int time_hour;
+unsigned long int time_min;
+std::vector<int> TimeHour;
+std::vector<int> TimeMin;
+std::vector<int> WeightSchedule;
+
+HX711 scale;
 
 //task_1 : "cho an thu cong";
 //task_2 : "cho an tu dong";
 //task_3 : "hen gio cho an";
 
-boolean isAuto = false;
 boolean isFeed = false;
 boolean isDone = false;
 boolean isTask1 = false;
 boolean isTask2 = false;
 boolean isTask3 = false;
 
-// weight_static : là lượng khi cho ăn tự động 
-// weight_tmp : lượng cho ăn thủ công 
-// weight_schedule : lượng hẹn giờ
+const int LOADCELL_DOUT_PIN = 23;
+const int LOADCELL_SCK_PIN = 18;
+
+const int PIN_TO_SENSOR = 35; // GIOP19 pin connected to OUTPUT pin of sensor
+int pinStateCurrent = LOW;    // current state of pin
+int pinStatePrevious = LOW;   // previous state of pin
+boolean motionCheck = false;
 
 int weight_static = 0;
 int weight_tmp = 0;
-int weight_schedule = 0;
-int time_hour = 0;
-int time_min = 0;
-int time_day = 0;
-int time_month = 0;
-
-int time_schedule_hour = 0;
-int time_schedule_min = 0;
-int time_schedule_day = 0;
-int time_schedule_month = 0;
 
 DynamicJsonDocument mess_publish(200);
 StaticJsonDocument<200> mess_subcribe;
 
-  // trộn thức ăn
-//void rotate(){
-//  int current_time = millis();
-//  if(millis()< current_time + 10000){
-//    for(int pos = 0; pos <= 180; pos += 1) { 
-//      myservo1.write(pos);              
-//      delay(10);                       
-//    }
-//    for(int pos = 180; pos >= 0; pos -= 1) { 
-//      myservo1.write(pos);              
-//      delay(10);                       
-//    }
-//  }
-//}
-//
-// mở nắp 
-void onServo() {
-  delay(15);
-  for(int pos = 0; pos <= 90; pos += 1) { 
-    myservo1.write(pos);              
-    delay(10);                       
-  }
-}
-// đóng nắp
-void offServo() {
-  delay(15);
-  for(int pos = 90; pos >= 0; pos -= 1) { 
-    myservo1.write(pos);              
-    delay(10);                       
-  }
+void setup_hx711()
+{
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  Serial.println("Before setting up the scale:");
+  Serial.print("read: \t\t");
+  Serial.println(scale.read()); // print a raw reading from the ADC
+  scale.set_scale(1901.f);
+  scale.tare();
 }
 
 void setup_wifi() {
@@ -141,59 +122,107 @@ void callback(char* topic, byte *payload, unsigned int length) {
   }
   Serial.println(messageTemp);
     // chuyển mess từ char[] sang đối tượng json 
+  
   deserializeJson(mess_subcribe, messageTemp);
-  time_month = mess_subcribe["DateTime"][0];
-  time_day = mess_subcribe["DateTime"][1];
-  time_hour = mess_subcribe["DateTime"][2];
-  time_min = mess_subcribe["DateTime"][3];
   
     // ----- so sánh 2 id, nếu đúng thì tiếp tục -----
   if(strcmp(devide_ID, mess_subcribe["DevideID"]) == 0){
-
-    // nếu vào task1 : cho ăn thủ công 
-    if(strcmp(mess_subcribe["Task"],"1") == 0){
-      isTask1 = true;
+  //Xử lí task2
+    if (strcmp(mess_subcribe["Task"], "2") == 0)
+    {
+      double tmp = scale.get_units(10);
       weight_tmp = mess_subcribe["Weight"];
-      Serial.print("weight_tmp : ");
-      Serial.println(weight_tmp);
-      Serial.println("Vao Task 1 : cho an thu cong");
-    } 
-    // nếu vào task2 : cho ăn tự động 
-    else if(strcmp(mess_subcribe["Task"],"2") == 0){
-      if(strcmp(mess_subcribe["isAuto"],"1") == 0){
-        isTask2 = true;
-        weight_static = mess_subcribe["Weight"];
-      }else {
-        isTask2 = false;
-      }
-      Serial.println("Vao Task 2 : cho an tu dong");
-    } 
-    // nếu vào task3 : đặt lịch  
-    else if(strcmp(mess_subcribe["Task"],"3") == 0){
+      weight_tmp += tmp;
+      weight_static = mess_subcribe["Weight"];
+      isTask2 = true;
+      isTask3 = false;
+      isTask1 = false;
+    }
+    else if (strcmp(mess_subcribe["Task"], "3") == 0)//Xử lí task 3
+    {
+      TimeHour.clear();
+      TimeMin.clear();
+      WeightSchedule.clear();
       isTask3 = true;
-      weight_schedule = mess_subcribe["Weight"];
-      Serial.print("weight_schedule : ");
-      Serial.println(weight_schedule);
-      time_schedule_month = mess_subcribe["TimeSchedule"][0];
-      time_schedule_day = mess_subcribe["TimeSchedule"][1];
-      time_schedule_hour = mess_subcribe["TimeSchedule"][2];
-      time_schedule_min = mess_subcribe["TimeSchedule"][3];
-      Serial.println("Vao Task 3 : dat lich cho an");
-    } else {
+      isTask2 = false;
+      // isTask1 = false;
+      //    date_time_seconds += 25170;
+      int lengthSchedule = mess_subcribe["TimeSchedule"].size();
+      Serial.printf("size map: %d \n", lengthSchedule);
+      for (int i = 0; i < lengthSchedule; i++)
+      {
+        time_hour = mess_subcribe["TimeSchedule"][i][0];
+        time_min = mess_subcribe["TimeSchedule"][i][1];
+        int weightjson = mess_subcribe["Weight"][i];
+        TimeHour.push_back(time_hour);
+        TimeMin.push_back(time_min);
+        WeightSchedule.push_back(weightjson);
+      }
+      for (int i = 0; i < lengthSchedule; i++)
+      {
+        Serial.printf("%d", TimeHour[i]);
+        Serial.print(": ");
+        Serial.print(TimeMin[i]);
+        Serial.println();
+      }
+      Serial.print("test: ");
+      Serial.println(time_min);
+      Serial.println("w1: ");
+      Serial.println(weight_tmp);
+    }
+    else if (strcmp(mess_subcribe["Task"], "1") == 0)//Xử lí task1
+    {
+      double tmp = scale.get_units(10);
+      weight_tmp = mess_subcribe["Weight"];
+      weight_tmp += tmp;
+      weight_static = mess_subcribe["Weight"];
+      isTask1 = true;
+      Serial.println("w1: ");
+      Serial.println(weight_tmp);
+    }
+    else
+    {
       Serial.println("Invalid task.");
     }
   }
 }
 
+boolean findSchedule(double hour, double min)
+{
+  int size = TimeHour.size();
+  for (int i = 0; i < size; i++)
+  {
+    if (TimeHour[i] == hour && TimeMin[i] == min)
+    {
+      double tmp = scale.get_units(10);
+      weight_tmp = WeightSchedule[i];
+      weight_tmp += tmp;
+      weight_static = WeightSchedule[i];
+      Serial.println("hi schedule");
+      return true;
+    }
+  }
+  return false;
+}
+
 void setup() {
-  myservo1.attach(27);
-//  myservo2.attach(servo2_pin);
-  myservo1.write(0);  
+  myservo1.attach(servo1_pin);
   Serial.begin(115200);
   setup_wifi();
   client.setServer(MQTT_SERVER, MQTT_PORT);
   client.setCallback(callback);
   connect_to_broker();
+
+  // setup sr501
+  pinMode(PIN_TO_SENSOR, INPUT);
+  pinMode(Led, OUTPUT);
+  digitalWrite(Led, LOW);
+  // end setup sr501
+  // buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  // endbuzzer
+  setup_hx711();
+  
   while (!Serial) continue;
   if (!rtc.begin()) {
     Serial.println("Couldn't find RTC");
@@ -209,147 +238,155 @@ void setup() {
 }
 int current_weight=0;
 
-//void Feeding(){
-//    if(current_weight < weight_tmp){
-//     myservo1.write(180);  
-//      //double weight = scale.get_units(10);
-//     double weight = 10;
-//     Serial.print("weight: ");
-//     Serial.println(weight);
-//     current_weight+= weight;
-//     Serial.print("curr weight: ");
-//     Serial.println(current_weight);
-//    delay(100);
-//    }else{
-//     //current_weight = 0;
-//     myservo1.write(0);
-//     isFeed=false;
-//     isDone=true;
-//     Serial.println("Done");
-//     delay(1000);
-//    } 
-//}
+void Feeding()
+{
+  // lượng thức ăn hiện tại có trong bát
+  // current_weight=scale.get_units(10);
+  if (current_weight < weight_tmp)
+  {
+    myservo1.write(90);
+     double weight = scale.get_units(10);
+   // double weight = 10;
+    Serial.print("weight: ");
+    Serial.println(weight);
+    current_weight = weight;
+    Serial.print("curr weight: ");
+    Serial.println(current_weight);
+    delay(100);
+  }
+  else
+  {
+    delay(100);
+    myservo1.write(0);
+    isFeed = false;
+    isDone = true;
+    Serial.println("Done");
+  }
+}
 
+void notify()
+{
+  for (int i = 0; i < 3; i++)
+  {
+    digitalWrite(BUZZER_PIN, HIGH); // turn on
+    delay(1000);
+    digitalWrite(BUZZER_PIN, LOW); // turn off
+    delay(1000);
+  }
+}
+
+void Publish()
+{
+  DateTime now = rtc.now();
+  delay(1000);
+  JsonArray Datetime = mess_publish.createNestedArray("Datetime");
+  Datetime.add(now.month());
+  Datetime.add(now.day());
+  Datetime.add(now.hour());
+  Datetime.add(now.minute());
+  char buffer[256];
+  mess_publish["Weight"] = weight_static;
+  serializeJson(mess_publish, buffer);
+  client.publish(MQTT_COMPLETE_TOPIC, buffer);
+
+  // weight_tmp = 0;
+  // test
+ // current_weight = 0;
+  // end test
+  isDone = false;
+  Serial.println("published");
+
+  delay(500);
+}
 
 void loop() {
+  //nhận message
   client.loop();
-  if (!client.connected()) {
+  //kết nối broker
+  if (!client.connected())
+  {
     connect_to_broker();
   }
+  //trạng thái của cảm biến chuyển động
+  pinStatePrevious = pinStateCurrent;           // store old state
+  pinStateCurrent = digitalRead(PIN_TO_SENSOR); // read new state
+  //Lấy thời gian của cảm biến thời gian thực
   DateTime now = rtc.now();
 
-  // in giờ phút giây để dễ theo dõi
-    Serial.print(now.hour(), DEC);
-    Serial.print(':');
-    Serial.print(now.minute(), DEC);
-    Serial.print(':');
-    Serial.print(now.second(), DEC);
-    Serial.print("  Curr_weight : ");
-    Serial.println(current_weight);
-    delay(1000);
-    
-  // hàm xử lý cho ăn thủ công 
-  if (isTask1 == true &&(time_hour == now.hour()) && (time_min == now.minute()) && (time_month == now.month())&&(time_day == now.day())) {
-    delay(1000);   
-    char buffer[256];
-    Serial.println();
-    Serial.println("chay task 1 : cho an thu cong va publish mess");
-    mess_publish["Weight"] = weight_tmp;
-    JsonArray Datetime = mess_publish.createNestedArray("Datetime");
-    Datetime.add(time_month);
-    Datetime.add(time_day);
-    Datetime.add(time_hour);
-    Datetime.add(time_min);
-    serializeJson(mess_publish, buffer);
-    client.publish(MQTT_COMPLETE_TOPIC, buffer);
+  Serial.print("check: ");
+  Serial.print(now.hour());
+  Serial.print("/");
+  Serial.println(now.minute());
+  double nowHour = now.hour();
+  double nowMin = now.minute();
+  delay(1000);
+  // hàm xử lý cho ăn thủ công
+  if (isTask1 == true && isFeed == false)
+  {
+    isFeed = true;
 
-    // đặt lại weight_tmp : là lượng sẽ có trên cân sau khi nhả xong
-    weight_tmp += current_weight;
-      //  rotate(); // dùng cho trộn => test sau
-    if(weight_tmp > 0){
-      if(current_weight < weight_tmp){
-       onServo();  
-        //double weight = scale.get_units(10);
-       double weight = 1;
-       while(current_weight < weight_tmp){
-         current_weight += weight;
-         Serial.print("current weight: ");
-         Serial.println(current_weight);
-         delay(1000);
-       }
-       offServo();
-      }
+  }
+  else if (isTask2 == true)//Xử lí cho ăn tự động
+  {
+    //Phát hiện chuyển động
+    if (pinStatePrevious == LOW && pinStateCurrent == HIGH)
+    { // pin state change: LOW -> HIGH
+      Serial.println("Motion detected!");
+      digitalWrite(Led, HIGH);
+      motionCheck = true;
+      delay(1000);
+      // TODO: turn on alarm, light or activate a device ... here
     }
-    isTask1 = false;
-    weight_tmp = 0;
-    Serial.print("isTask1 = ");
-    Serial.println(isTask1);
-    Serial.println("Done");
-    delay(1000); 
+    else if (pinStatePrevious == HIGH && pinStateCurrent == LOW)
+    { // pin state change: HIGH -> LOW
+      Serial.println("Motion stopped!");
+      digitalWrite(Led, LOW);
+      delay(1000);
+      // TODO: turn off alarm, light or deactivate a device ... here
+    }
+      double weight = scale.get_units(10);
+    //Cho ăn khi phát hiện vật nuôi tới và lượng thức ăn gần hết
+    if (motionCheck == true && weight < 10)
+    {
+      double tmp = scale.get_units(10);
+      weight_tmp = mess_subcribe["Weight"];
+      weight_tmp += tmp;
+      weight_static = mess_subcribe["Weight"];
+      isFeed = true;
+    }
+  }
+  //Xử lí cho ăn theo lịch
+  else if (findSchedule(nowHour, nowMin) && isTask3 == true && isTask2 == false && isFeed == false)
+  {
+    isFeed = true;
   }
 
-  // isTask2 == isAuto : có tự động hay không
-  if(isTask2 == true){
-    Serial.print("isAuto = true ; ");
-    Serial.print(" weight static = ");
-    Serial.println(weight_static);
-    Serial.println();
-    if(current_weight < weight_static){
-      if(current_weight < weight_static){
-        onServo();  
-        double weight = 1;
-        while(current_weight < weight_static){
-         current_weight += weight;
-         Serial.print("current weight: ");
-         Serial.println(current_weight);
-         delay(1000);
-         }
-        offServo();
-        }
-       mess_publish["Weight"] = current_weight;
-       char buffer[256];
-        JsonArray Datetime = mess_publish.createNestedArray("Datetime");
-        Datetime.add(now.month());
-        Datetime.add(now.day());
-        Datetime.add(now.hour());
-        Datetime.add(now.minute());
-        serializeJson(mess_publish, buffer);
-        client.publish(MQTT_COMPLETE_TOPIC, buffer);
-        Serial.println("Done");
-        delay(1000);
-      }  
+  if (isFeed == true)
+  {
+    Feeding();
+  }
+  
+  if (isDone == true)
+  {
+    if (isTask1 == true)
+    {
+      Publish();
+      isTask1 = false;
+      Serial.println("Hi task 1");
     }
-  // nếu có hẹn giờ và không tự động cho ăn
-  if((isTask3 == true && isTask2 == false) && (time_schedule_hour == now.hour()) && (time_schedule_min == now.minute()) 
-      && (time_schedule_month == now.month())&&(time_schedule_day == now.day())){
-    delay(1000);   
-    char buffer[256];
-    Serial.println("chay task 3 : dat lich cho an va publish mess");
-    mess_publish["Weight"] = weight_schedule;
-    JsonArray Datetime = mess_publish.createNestedArray("Datetime");
-    Datetime.add(time_schedule_month);
-    Datetime.add(time_schedule_day);
-    Datetime.add(time_schedule_hour);
-    Datetime.add(time_schedule_min);
-    serializeJson(mess_publish, buffer);
-    client.publish(MQTT_COMPLETE_TOPIC, buffer);
-    isTask3 = false;
-    // đặt lại weight_schedule = lượng sẽ có sau khi nhả
-    weight_schedule += current_weight;
-    
-    if(current_weight < weight_schedule){
-       onServo();  
-       //double weight = scale.get_units(10);
-       double weight = 1;
-       while(current_weight < weight_schedule){
-         current_weight += weight;
-         Serial.print("current weight: ");
-         Serial.println(current_weight);
-         delay(1000);
-       }
-      offServo();
+    else if (isTask2 == true)
+    {
+      Publish();
+      isTask2 = true;
+      motionCheck = false;
+      Serial.println("Hi task 2");
     }
-   Serial.println("Done");
-   delay(1000);
+    else if (isTask3 == true)
+    {
+      Publish();
+      isTask3 = true;
+      Serial.println("Hi task 3");
+      delay(50000);
+    }
   }
 }
